@@ -1,0 +1,756 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+  <head>
+    <meta charset="utf-8">
+    <title></title>
+    <script src="/static/js/gl-matrix.js"></script>
+    <script id="shadow-shader-fs" type="x-shader/x-fragment">
+      precision highp float;
+
+      varying float v_Depth;
+      void main(){
+        vec2 cxy = 2.0 * gl_PointCoord - 1.0;
+        float r = dot(cxy, cxy);
+        if (r > 1.0) {
+            discard;
+        }
+
+        gl_FragColor = vec4(v_Depth, 0.0, 0.0, 1.0);
+      }
+    </script>
+    <script id="shadow-shader-vs" type="x-shader/x-vertex">
+      uniform mat4 u_Mmatrix;
+      uniform mat4 u_Vmatrix;
+      uniform mat4 u_Omatrix;
+      uniform mat4 u_Pmatrix;
+
+      attribute vec3 a_Position;
+      varying float v_Depth;
+      void main(){
+        vec4 vertex_pos = u_Pmatrix * u_Vmatrix * u_Mmatrix * vec4(a_Position, 1.0);
+
+        vec4 ortho_pos = u_Omatrix * u_Vmatrix * u_Mmatrix * vec4(a_Position, 1.0);
+        v_Depth = 0.5 + (vertex_pos.z / vertex_pos.w) * 0.5;
+
+        gl_PointSize = 7.0;
+        gl_Position = ortho_pos;
+      }
+    </script>
+
+    <script id="shader-fs" type="x-shader/x-fragment">
+      precision highp float;
+
+      uniform sampler2D sampler;
+
+      varying vec3 v_vertPos;
+      varying vec3 v_Normal;
+      varying vec2 v_uv;
+      varying vec3 v_lightPos;
+
+      uniform vec3 lightDir[4];
+      uniform bool shadow_camera;
+
+      uniform vec3 mainLightDir;
+
+      const vec3 source_diffuse_color = vec3(1.0, 1.0, 1.0);
+      const vec3 source_ambient_color = vec3(0.2, 0.2, 0.2);
+
+      void main(){
+        //
+        if(shadow_camera){
+          vec2 uv_shadowMap = v_lightPos.xy;
+          vec4 ShadowMap = texture2D(sampler, uv_shadowMap);
+
+          float thisShadow = 1.0;
+
+          if(ShadowMap.z + 0.01 < v_lightPos.z){
+            thisShadow = 0.3;
+          }
+          gl_FragColor = vec4(vec3(0.7, 0.7, 0.7) * thisShadow, 1.0);
+        }else{
+
+          vec3 normal = normalize(v_Normal);
+
+          vec3 color = vec3(0.0, 0.0, 0.0);
+
+
+          for(int i = 0; i < 4; i+=1){
+            color = color + source_ambient_color + source_diffuse_color * (max(0.0, dot(normal, normalize(lightDir[i] - v_vertPos))) / 20.0);
+          }
+
+
+          vec3 mainLight = normalize(mainLightDir - v_vertPos);
+          color = color + source_ambient_color + source_diffuse_color * max(0.0, dot(normal, mainLight));
+
+          vec2 cxy = 2.0 * gl_PointCoord - 1.0;
+          float r = dot(cxy, cxy);
+          if (r > 1.0) {
+            discard;
+          }
+
+          gl_FragColor = vec4(color * vec3(0.8, 0.8, 0.8), 1.0);
+
+        }
+      }
+    </script>
+    <script id="shader-vs" type="x-shader/x-vertex">
+      uniform mat4 u_Pmatrix;
+      uniform mat4 u_Mmatrix;
+      uniform mat4 u_Vmatrix;
+      uniform mat4 u_Nmatrix;
+
+      uniform mat4 u_Lvmatrix;
+      uniform mat4 u_Opmatrix;
+
+      attribute vec3 a_Position;
+      attribute vec3 a_Normal;
+      attribute vec2 a_uv;
+
+      varying vec3 v_vertPos;
+      varying vec3 v_Normal;
+      varying vec2 v_uv;
+      varying vec3 v_lightPos;
+
+      uniform bool shadow_camera;
+
+      void main(){
+        v_uv = a_uv;
+
+        vec4 LightPos = u_Opmatrix * u_Lvmatrix * u_Mmatrix * vec4(a_Position, 1.0);
+        vec3 light_dnc = LightPos.xyz / LightPos.w;
+        v_lightPos = vec3(0.5, 0.5, 0.5) + light_dnc * 0.5;
+
+        v_Normal = normalize(u_Nmatrix * vec4(normalize(a_Normal), 1.0)).xyz;
+        v_vertPos = (u_Vmatrix * u_Mmatrix * vec4(a_Position, 1.0)).xyz;
+
+        vec4 pos = u_Pmatrix * u_Vmatrix * u_Mmatrix * vec4(a_Position, 1.0);
+
+        gl_PointSize = (1.0 / pos.z) * 150.0;
+        gl_Position = pos;
+
+      }
+    </script>
+  </head>
+  <body>
+    <script type="text/javascript">
+      function create_shader(gl, mode, source){
+        let shader;
+
+        if(mode == "fs"){
+          shader = gl.createShader(gl.FRAGMENT_SHADER);
+        }
+        else if(mode == "vs"){
+          shader = gl.createShader(gl.VERTEX_SHADER);
+        }
+
+        gl.shaderSource(shader, source);
+        gl.compileShader(shader);
+
+        return shader;
+      }
+
+      function create_program(gl, fs_source, vs_source){
+        let fs = create_shader(gl, "fs", fs_source);
+        let vs = create_shader(gl, "vs", vs_source);
+
+        let program = gl.createProgram();
+        gl.attachShader(program, fs);
+        gl.attachShader(program, vs);
+
+        gl.linkProgram(program);
+
+        return program;
+      }
+
+      function create_texture(gl, canvas){
+        var rb = gl.createRenderbuffer();
+        gl.bindRenderbuffer(gl.RENDERBUFFER, rb);
+        gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, canvas.width, canvas.height);
+
+        let fb = gl.createFramebuffer();
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+
+        let texture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.drawingBufferWidth, gl.drawingBufferHeight, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+        gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, rb);
+
+
+
+        gl.bindTexture(gl.TEXTURE_2D, null);
+        gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+        return [texture, fb, rb];
+      }
+
+      async function plane(){
+        let response = await fetch("/static/Model.json");
+        response = await response.json();
+
+        return {
+          "vertices": response.meshes[1].vertices,
+          "faces": [].concat.apply([], response.meshes[1].faces),
+          "normals": response.meshes[1].normals,
+          "uv": response.meshes[1].texturecoords[0]
+        }
+
+      }
+
+      async function model(){
+        let response = await fetch("/static/LeePerrySmith.json");
+        response = await response.json();
+
+        return {
+          "vertices": response.meshes[0].vertices,
+          "normals": response.meshes[0].normals,
+        }
+      }
+
+      let light_vec = [10, 5, 10];
+      // let rotate_mat = glMatrix.mat4.create();
+      // let vec = [0.5773, 0.5773, 0.5773];
+      // let phi_vec = Math.asin(vec[1] / (1 - vec[2]));
+      // let theta_vec = Math.acos(vec[0] / Math.cos(phi_vec));
+      // glMatrix.mat4.rotateX(rotate_mat, rotate_mat, phi_vec);
+      // glMatrix.mat4.rotateY(rotate_mat, rotate_mat, theta_vec);
+
+      // light_vec = multiply(
+      //   [ rotate_mat.slice(0, 4),
+      //     rotate_mat.slice(4, 8),
+      //     rotate_mat.slice(8, 12),
+      //     rotate_mat.slice(12, 16)], light_vec);
+      // light_vec = [].concat.apply([], light_vec);
+
+      let LightViewMatrix = glMatrix.mat4.create();
+      let modelMatrix = glMatrix.mat4.create();
+
+      glMatrix.mat4.translate(modelMatrix, modelMatrix, [0, 0, 0]);
+
+      function draw_shadow_to_texture(gl, fb, texture, program){
+        //gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+
+
+
+        let ortoMatrix = glMatrix.mat4.create();
+        let perspectiveMatrix = glMatrix.mat4.create();
+
+        glMatrix.mat4.perspective(
+          perspectiveMatrix,
+          45 * Math.PI / 180,
+          canvas.width / canvas.height, 0.01, 100);
+
+        glMatrix.mat4.ortho(ortoMatrix, -20., 20., -20., 20., .1, 70.);
+        //glMatrix.mat4.translate(viewMatrix, viewMatrix, light_vec.slice(0, 3));
+
+        glMatrix.mat4.lookAt(LightViewMatrix, light_vec, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+
+
+        //glMatrix.mat4.rotateX(viewMatrix, viewMatrix, phi);
+        //glMatrix.mat4.rotateY(viewMatrix, viewMatrix, -theta);
+        // glMatrix.mat4.scale(modelMatrix, modelMatrix, [1, 2, 1]);
+
+        let u_Mmatrix = gl.getUniformLocation(program, "u_Mmatrix");
+        let u_Vmatrix = gl.getUniformLocation(program, "u_Vmatrix");
+        let u_Omatrix = gl.getUniformLocation(program, "u_Omatrix");
+        let u_Pmatrix = gl.getUniformLocation(program, "u_Pmatrix");
+
+        gl.uniformMatrix4fv(u_Pmatrix, false, perspectiveMatrix);
+        gl.uniformMatrix4fv(u_Mmatrix, false, modelMatrix);
+        gl.uniformMatrix4fv(u_Vmatrix, false, LightViewMatrix);
+        gl.uniformMatrix4fv(u_Omatrix, false, ortoMatrix);
+      }
+
+      let phi = 0; let theta = 0;
+      let old_x = 0; let old_y = 0;
+
+      let left_mouse_down = false;
+      let right_mouse_down = false;
+      let depth_num = 15;
+
+      function multiply(a, b) {
+        var aNumRows = a.length, aNumCols = a[0].length,
+            bNumRows = b.length, bNumCols = b[0].length,
+            m = new Array(aNumRows);
+        for (var r = 0; r < aNumRows; ++r) {
+          m[r] = new Array(bNumCols);
+          for (var c = 0; c < bNumCols; ++c) {
+            m[r][c] = 0;
+            for (var i = 0; i < aNumCols; ++i) {
+              m[r][c] += a[r][i] * b[i][c];
+            }
+          }
+        }
+        return m;
+      }
+
+      let velocity_vec = [];
+      async function WebglRender(gl, canvas){
+        canvas.oncontextmenu = function(e) { e.preventDefault(); e.stopPropagation(); }
+        canvas.onmousemove = function(e){
+          let x = e.offsetX;
+          let y = e.offsetY;
+
+          if(right_mouse_down){
+            let rotateDelta = {
+              "x": x - old_x,
+              "y": y - old_y,
+            }
+
+            let t = 2 * Math.PI * rotateDelta.x / canvas.width;
+            let p = 2 * Math.PI * rotateDelta.y / canvas.height;
+
+            phi += p;
+            theta += t;
+          }
+          else if(left_mouse_down){
+            let nx = -(0.5 - x / canvas.width) / 0.5;
+            let ny = (0.5 - y / canvas.height) / 0.5;
+
+            let nold_x = -(0.5 - old_x / canvas.width) / 0.5;
+            let nold_y = (0.5 - old_y / canvas.height) / 0.5;
+
+            let dx = nx - nold_x;
+            let dy = ny - nold_y;
+
+
+            let rotate_mat = glMatrix.mat4.create();
+            glMatrix.mat4.rotateX(rotate_mat, rotate_mat, phi);
+            glMatrix.mat4.rotateY(rotate_mat, rotate_mat, theta);
+
+            let result = multiply(
+              [ rotate_mat.slice(0, 4),
+                rotate_mat.slice(4, 8),
+                rotate_mat.slice(8, 12),
+                rotate_mat.slice(12, 16)], [[dx], [dy], [0], [1]])
+
+            result = [].concat.apply([], result);
+
+            let mouse_pos = multiply(
+              [ rotate_mat.slice(0, 4),
+                rotate_mat.slice(4, 8),
+                rotate_mat.slice(8, 12),
+                rotate_mat.slice(12, 16)],
+              [[nx], [ny], [0], [1]]
+            );
+            mouse_pos = [].concat.apply([], mouse_pos);
+
+
+            mouse_pos[0] *= (depth_num / 2);
+            mouse_pos[1] *= (depth_num / 2);
+            mouse_pos[2] *= (depth_num / 2);
+
+
+
+            document.dispatchEvent(new CustomEvent("power", {detail: {
+              "speed_vec": result,
+              "current_pos": mouse_pos,
+            }}));
+
+          }
+
+          old_x = x;
+          old_y = y;
+        }
+        canvas.onmousewheel = function(e){
+          let new_depth_num;
+
+          if(e.deltaY == -100){
+            new_depth_num = depth_num - 0.5;
+          }
+          else{
+            new_depth_num = depth_num + 0.5;
+          }
+          depth_num = new_depth_num;
+        }
+        canvas.onmousedown = function(e){
+          if(e.button == 0){
+            left_mouse_down = true;
+          }
+          else{
+            right_mouse_down = true;
+          }
+          e.preventDefault();
+          return false;
+        }
+
+        canvas.onmouseup = function(e){
+          if(e.button == 0){
+            left_mouse_down = false;
+          }
+          else{
+            right_mouse_down = false;
+          }
+          e.preventDefault();
+          return false;
+        }
+
+        let shadow_program = create_program(
+          gl,
+          document.querySelector("#shadow-shader-fs").text,
+          document.querySelector("#shadow-shader-vs").text
+        );
+
+        let vertex_program = create_program(
+          gl,
+          document.querySelector("#shader-fs").text,
+          document.querySelector("#shader-vs").text
+        );
+        //gl.useProgram(shadow_program);
+        gl.viewport(0, 0, 1024, 1024);
+
+        let [texture, fb, rb] = create_texture(gl, canvas);
+        let data = await model();
+        const old_data = {
+          "vertices": new Float32Array(data.vertices)
+        };
+        let plane_data = await plane();
+
+        function collision(v1, v2){
+          // v1 speed  material point
+          // v2 user mouse speed
+          let speed1 = Math.sqrt(v1[0]**2 + v1[1]**2 + v1[2]**2);
+          let speed2 = Math.sqrt(v2[0]**2 + v2[1]**2 + v2[2]**2);
+          let mass2 = 5;
+          let mass1 = 1;
+
+          let new_speed1 = (2 * mass2 * speed2 + (mass1 - mass2) * speed1) / (mass1 + mass2);
+
+          return new_speed1;
+        }
+
+        document.addEventListener("power", function(e){
+          let power_data = e.detail;
+          let speed = power_data.speed_vec;
+
+          speed[0] *= 1.0;
+          speed[1] *= 1.0;
+          speed[2] *= 1.0;
+
+          let now_pos = power_data.current_pos;
+
+          for(let i = 0; i < data.vertices.length; i += 3){
+            let sphere_x = now_pos[0]; // * (depth_num / 2);
+            let sphere_y = now_pos[1]; // * (depth_num / 2);
+            let sphere_z = now_pos[2]; // * (depth_num / 2);
+
+            let ln = Math.sqrt(
+              (data.vertices[i] - sphere_x)**2 +
+              (data.vertices[i + 1] - sphere_y)**2 +
+              (data.vertices[i + 2] - sphere_z)**2
+            );
+            //console.log(ln)
+            if(ln <= 3){
+              let new_speed = collision(
+                [velocity_vec[i], velocity_vec[i + 1], velocity_vec[i + 2]],
+                [speed[0], speed[1], speed[2]]
+              );
+
+              // crossX = vector1.Y * vector2.Z - vector2.Y * vector1.Z
+              // crossY = -(vector1.X * vector2.Z - vector2.X * vector1.Z)
+              // crossZ = vector1.X * vector2.Y - vector2.X * vector1.Y
+
+
+              let n_x = data.vertices[i] - sphere_x;
+              let n_y = data.vertices[i + 1] - sphere_y;
+              let n_z = data.vertices[i + 2] - sphere_z;
+
+              n_x /= ln;
+              n_y /= ln;
+              n_z /= ln;
+
+              let vel_vec = {
+                "x": (n_x + speed[0]) / 2,
+                "y": (n_y + speed[1]) / 2,
+                "z": (n_z + speed[2]) / 2
+              };
+              let velocity_ln = Math.sqrt(vel_vec.x**2 + vel_vec.y**2 + vel_vec.z**2);
+
+              vel_vec.x /= velocity_ln;
+              vel_vec.y /= velocity_ln;
+              vel_vec.z /= velocity_ln;
+
+              velocity_vec[i] = vel_vec.x * 0.3;
+              velocity_vec[i + 1] = vel_vec.y * 0.3;
+              velocity_vec[i + 2] = vel_vec.z * 0.3;
+
+              data.vertices[i] += (n_x * 0.3)
+              data.vertices[i + 1] += (n_y * 0.3)
+              data.vertices[i + 2] += (n_z * 0.3)
+
+            }
+
+          }
+        })
+
+        let normal_buffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, normal_buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data.normals), gl.STATIC_DRAW);
+
+        let plane_vertices_buffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, plane_vertices_buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(plane_data.vertices), gl.STATIC_DRAW);
+
+        let plane_normal_buffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, plane_normal_buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(plane_data.normals), gl.STATIC_DRAW);
+
+        let plane_face_buffer = gl.createBuffer();
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, plane_face_buffer);
+        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(plane_data.faces), gl.STATIC_DRAW);
+
+        let plane_uv_buffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, plane_uv_buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(plane_data.uv), gl.STATIC_DRAW);
+
+
+
+        let projectMatrix = glMatrix.mat4.create();
+        glMatrix.mat4.perspective(projectMatrix, 45 * Math.PI / 180, canvas.width / canvas.height, 0.01, 100);
+
+        let planeModelMatrix = glMatrix.mat4.create();
+        // glMatrix.mat4.rotateX(planeModelMatrix, planeModelMatrix, 90 * (Math.PI / 180));
+        //glMatrix.mat4.rotateY(planeModelMatrix, planeModelMatrix, 180 * (Math.PI / 180));
+        glMatrix.mat4.translate(planeModelMatrix, planeModelMatrix, [0, -3, 0]);
+        glMatrix.mat4.scale(planeModelMatrix, planeModelMatrix, [5, 1, 5])
+
+
+        let planeNormalMatrix = glMatrix.mat4.create();
+        glMatrix.mat4.invert(planeNormalMatrix, planeModelMatrix);
+        glMatrix.mat4.transpose(planeNormalMatrix, planeNormalMatrix);
+
+
+
+        //glMatrix.mat4.scale(modelMatrix, modelMatrix, [0.8, 0.8, 0.8]);
+
+        let normalMatrix = glMatrix.mat4.create();
+        glMatrix.mat4.invert(normalMatrix, modelMatrix);
+        glMatrix.mat4.transpose(normalMatrix, normalMatrix);
+
+        gl.enable(gl.DEPTH_TEST);
+        gl.depthFunc(gl.LEQUAL);
+        gl.clearDepth(1.0);
+
+
+
+         gl.getExtension('WEBGL_depth_texture');
+         let vertices_buffer = gl.createBuffer();
+         velocity_vec = new Float32Array(data.vertices.length);
+
+        let back_step = false;
+        document.querySelector("#btn").onclick = function(){
+          back_step = true;
+        }
+
+        function animate(){
+          let count = 0;
+
+          for(let i = 0; i < data.vertices.length; i+=3){
+
+            if(back_step){
+              velocity_vec[i] = 0;
+              velocity_vec[i + 1] = 0;
+              velocity_vec[i + 2] = 0;
+            }
+
+            data.vertices[i] += velocity_vec[i];
+            data.vertices[i + 1] += velocity_vec[i + 1];
+            data.vertices[i + 2] += velocity_vec[i + 2];
+
+            velocity_vec[i] *= 0.99;
+            velocity_vec[i + 1] *= 0.99;
+            velocity_vec[i + 2] *= 0.99;
+
+            let nx = old_data.vertices[i] - data.vertices[i];
+            let ny = old_data.vertices[i + 1] - data.vertices[i + 1];
+            let nz = old_data.vertices[i + 2] - data.vertices[i + 2];
+
+            let ln = Math.sqrt(nx**2 + ny**2 + nz**2);
+            if(ln <= 0.1){
+              data.vertices[i] = old_data.vertices[i];
+              data.vertices[i + 1] = old_data.vertices[i + 1];
+              data.vertices[i + 2] = old_data.vertices[i + 2];
+              continue;
+            }
+            count += 1;
+            nx /= ln; ny /= ln; nz /= ln;
+
+            nx *= (ln * 0.05); ny *= (ln * 0.05); nz *= (ln * 0.05);
+
+            data.vertices[i] += nx;
+            data.vertices[i + 1] += ny;
+            data.vertices[i + 2] += nz;
+          }
+          if(count == 0){
+            back_step = false;
+          }
+          gl.bindBuffer(gl.ARRAY_BUFFER, vertices_buffer);
+          gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data.vertices), gl.STATIC_DRAW);
+
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+          gl.useProgram(shadow_program);
+          gl.bindRenderbuffer(gl.RENDERBUFFER, rb);
+
+          //gl.viewport(0.0, 0.0, 1024, 1024);
+          gl.clearColor(1.0, 1.0, 1.0, 1.0);
+          gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+          let viewMatrix = glMatrix.mat4.create();
+          glMatrix.mat4.translate(viewMatrix, viewMatrix, [0, 0, -depth_num]);
+          glMatrix.mat4.rotateX(viewMatrix, viewMatrix, phi);
+          glMatrix.mat4.rotateY(viewMatrix, viewMatrix, theta);
+
+          draw_shadow_to_texture(gl, fb, texture, shadow_program);
+          let a_Position = gl.getAttribLocation(shadow_program, "a_Position");
+
+          gl.bindBuffer(gl.ARRAY_BUFFER, vertices_buffer);
+
+          gl.enableVertexAttribArray(a_Position);
+          gl.vertexAttribPointer(a_Position, 3, gl.FLOAT, false, 4 * 3, 0);
+          gl.drawArrays(gl.POINT, 0, data.vertices.length / 3);
+          gl.flush();
+
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+
+
+          gl.useProgram(vertex_program);
+          gl.viewport(0, 0, canvas.width, canvas.height);
+          gl.clearColor(0.5, 0.5, 0.5, 1.0);
+
+          gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+          a_Position = gl.getAttribLocation(vertex_program, "a_Position");
+          let a_Normal = gl.getAttribLocation(vertex_program, "a_Normal");
+          let a_uv = gl.getAttribLocation(vertex_program, "a_uv");
+
+          gl.enableVertexAttribArray(a_Position);
+          gl.enableVertexAttribArray(a_Normal);
+          gl.enableVertexAttribArray(a_uv);
+
+          let u_Pmatrix = gl.getUniformLocation(vertex_program, "u_Pmatrix");
+          let u_Mmatrix = gl.getUniformLocation(vertex_program, "u_Mmatrix");
+          let u_Vmatrix = gl.getUniformLocation(vertex_program, "u_Vmatrix");
+          let u_Nmatrix = gl.getUniformLocation(vertex_program, "u_Nmatrix");
+          let u_Lvmatrix = gl.getUniformLocation(vertex_program, "u_Lvmatrix");
+          let u_Opmatrix = gl.getUniformLocation(vertex_program, "u_Opmatrix");
+
+          let lightDir = gl.getUniformLocation(vertex_program, "lightDir");
+          let sampler = gl.getUniformLocation(vertex_program, "sampler");
+          let shadow_camera = gl.getUniformLocation(vertex_program, "shadow_camera");
+          let mainLightDir = gl.getUniformLocation(vertex_program, "mainLightDir");
+
+          gl.uniform1i(sampler, 0);
+          gl.uniform1i(shadow_camera, 1);
+
+
+          gl.uniformMatrix4fv(u_Vmatrix, false, viewMatrix);
+          gl.uniformMatrix4fv(u_Pmatrix, false, projectMatrix);
+          gl.uniformMatrix4fv(u_Mmatrix, false, planeModelMatrix);
+          gl.uniformMatrix4fv(u_Nmatrix, false, planeNormalMatrix);
+
+          let ortoMatrix = glMatrix.mat4.create();
+          glMatrix.mat4.ortho(ortoMatrix, -20., 20., -20., 20., .1, 70.);
+          gl.uniformMatrix4fv(u_Opmatrix, false, ortoMatrix);
+          gl.uniformMatrix4fv(u_Lvmatrix, false, LightViewMatrix);
+
+
+          gl.uniform3fv(mainLightDir, [light_vec[0], light_vec[1], light_vec[2]]);
+          gl.uniform3fv(lightDir, [
+            0, 0, 10,
+            0, 10, 0,
+            0, -10, 0,
+            0, 0, -10,
+          ]);
+
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+
+
+          gl.bindBuffer(gl.ARRAY_BUFFER, plane_vertices_buffer);
+          gl.vertexAttribPointer(a_Position, 3, gl.FLOAT, false, 4 * 3, 0);
+
+          gl.bindBuffer(gl.ARRAY_BUFFER, plane_normal_buffer);
+          gl.vertexAttribPointer(a_Normal, 3, gl.FLOAT, false, 4 * 3, 0);
+
+          gl.bindBuffer(gl.ARRAY_BUFFER, plane_uv_buffer);
+          gl.vertexAttribPointer(a_uv, 2, gl.FLOAT, false, 4 * 2, 0);
+
+          gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, plane_face_buffer);
+          gl.drawElements(gl.TRIANGLES, plane_data.faces.length, gl.UNSIGNED_SHORT, 0);
+
+
+          gl.uniform1i(shadow_camera, 0);
+
+          //gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, plane_face_buffer);
+          //gl.drawElements(gl.TRIANGLES, plane_data.faces.length, gl.UNSIGNED_SHORT, 0);
+
+          gl.uniformMatrix4fv(u_Mmatrix, false, modelMatrix);
+          gl.uniformMatrix4fv(u_Nmatrix, false, normalMatrix);
+
+          gl.bindBuffer(gl.ARRAY_BUFFER, normal_buffer);
+          gl.vertexAttribPointer(a_Normal, 3, gl.FLOAT, false, 4 * 3, 0);
+
+          gl.bindBuffer(gl.ARRAY_BUFFER, vertices_buffer);
+          gl.vertexAttribPointer(a_Position, 3, gl.FLOAT, false, 4 * 3, 0);
+
+
+          gl.drawArrays(gl.POINT, 0, data.vertices.length / 3);
+          requestAnimationFrame(animate);
+        }
+
+        animate();
+      }
+    </script>
+    <style media="screen">
+      #btn{
+        position: fixed;
+        top: 10px;
+        left: 10px;
+        z-index: 2;
+        padding: 5px 15px;
+        border: 1px solid;
+        border-radius: 15px;
+        font-family: system-ui;
+        font-weight: 100;
+        font-size: 20px;
+        cursor: pointer;
+        color: black;
+        background: white;
+      }
+      #canvas{
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        z-index: 1;
+      }
+    </style>
+    <canvas id="canvas"></canvas>
+    <button type="button" id="btn" name="button">Back</button>
+    <script type="text/javascript">
+      let canvas = document.querySelector("#canvas");
+      let rect = canvas.getBoundingClientRect();
+      canvas.width = rect.width;
+      canvas.height = rect.height;
+      window.onresize = function(e){
+        rect = canvas.getBoundingClientRect();
+        canvas.width = rect.width;
+        canvas.height = rect.height;
+        gl = canvas.getContext("webgl", {antialias: false});
+        WebglRender(gl, canvas);
+      }
+
+      let gl = canvas.getContext("webgl", {antialias: false});
+      WebglRender(gl, canvas);
+    </script>
+  </body>
+</html>
